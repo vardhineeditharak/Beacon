@@ -1,8 +1,6 @@
 # Beacon
 
-<p align="center">
-  <img src="public/beacon-logo.svg" alt="Beacon Logo" width="240" />
-</p>
+![Beacon Logo](public/beacon-logo.svg)
 
 A high-performance infrastructure, heartbeat, and uptime telemetry platform built with **Next.js 16** (App Router, Turbopack, Cache Components), **React 19**, **Prisma ORM**, **PostgreSQL**, **Tailwind CSS v4**, and dual execution architectures (**Serverless Cron** for zero-cost cloud deployment + **BullMQ/Redis** for distributed self-hosted clusters).
 
@@ -33,7 +31,7 @@ A high-performance infrastructure, heartbeat, and uptime telemetry platform buil
 
 ## Architecture Overview
 
-```
+```text
                                       +------------------------------------+
                                       |            Browser Client          |
                                       +-----------------+------------------+
@@ -62,18 +60,22 @@ A high-performance infrastructure, heartbeat, and uptime telemetry platform buil
 ## Getting Started
 
 ### 1. Prerequisites
+
 - **Node.js**: `>= 20.9.0` (required by Next.js 16)
 - **Package Manager**: `npm` (or `pnpm`)
 - **Database**: PostgreSQL (e.g., [Neon Serverless](https://neon.tech) free tier, or local Postgres)
 - **Optional**: Redis (only required if running local BullMQ worker/scheduler daemons)
 
 ### 2. Environment Configuration
+
 Copy `.env.example` to `.env`:
+
 ```bash
 cp .env.example .env
 ```
 
 Set the required environment variables:
+
 ```env
 # PostgreSQL connection URL
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/beacon?schema=public"
@@ -92,12 +94,15 @@ NEXT_PUBLIC_APP_URL="http://localhost:3000"
 ```
 
 ### 3. Install Dependencies
+
 ```bash
 npm install
 ```
 
 ### 4. Database Setup
+
 Push the schema to your PostgreSQL database:
+
 ```bash
 npm run db:push
 ```
@@ -107,13 +112,17 @@ npm run db:push
 ## Development & Deployment
 
 ### Running Locally (Next.js Dev Server)
+
 ```bash
 npm run dev
 ```
+
 Open [http://localhost:3000](http://localhost:3000) to create your operator account and configure monitors.
 
 ### Running Local Queue Workers (Optional)
+
 If running self-hosted BullMQ daemons:
+
 ```bash
 # Terminal 1: Check poller worker
 npm run worker
@@ -123,7 +132,9 @@ npm run scheduler
 ```
 
 ### Free 24/7 Cloud Deployment (No Screentime Burn)
+
 To avoid Render's 15-minute sleep cycle, 750 free compute hours limitation, and 30-day PostgreSQL database deletion:
+
 1. **Database**: Create a free PostgreSQL instance on [Neon](https://neon.tech) (0.5 GB persistent free storage, serverless connection pooling). Set `DATABASE_URL` with pooled connection.
 2. **Hosting**: Deploy to [Vercel](https://vercel.com).
 3. **Automated Monitoring**: The included `vercel.json` automatically schedules `/api/cron/check` every minute using Vercel Cron. Add `CRON_SECRET` and `SESSION_PASSWORD` in your Vercel Project Environment Variables.
@@ -133,7 +144,7 @@ To avoid Render's 15-minute sleep cycle, 750 free compute hours limitation, and 
 ## Available Scripts
 
 | Script | Command | Purpose |
-|---|---|---|
+| :--- | :--- | :--- |
 | `npm run dev` | `next dev` | Start local Next.js development server with Turbopack |
 | `npm run build` | `next build` | Build production Next.js application |
 | `npm run start` | `next start` | Run production Next.js server |
@@ -144,4 +155,5 @@ To avoid Render's 15-minute sleep cycle, 750 free compute hours limitation, and 
 ---
 
 ## License
+
 MIT

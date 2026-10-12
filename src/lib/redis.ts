@@ -7,8 +7,10 @@ export const redisConnection = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
   lazyConnect: true,
   retryStrategy(times) {
-    // Retry with backoff up to 10 seconds, but do not crash the process
-    return Math.min(times * 200, 10000);
+    if (times > 3) {
+      return null; // Stop reconnecting when Redis is unavailable
+    }
+    return Math.min(times * 200, 2000);
   },
 });
 
@@ -35,5 +37,36 @@ export function createWorkerConnection(): Redis {
   return conn;
 }
 
-export const checkQueue = new Queue('monitor-checks', { connection: redisConnection });
-export const alertQueue = new Queue('alerts', { connection: redisConnection });
+let _checkQueue: Queue | null = null;
+let _alertQueue: Queue | null = null;
+
+export function getCheckQueue(): Queue {
+  if (!_checkQueue) {
+    _checkQueue = new Queue('monitor-checks', { connection: redisConnection });
+  }
+  return _checkQueue;
+}
+
+export function getAlertQueue(): Queue {
+  if (!_alertQueue) {
+    _alertQueue = new Queue('alerts', { connection: redisConnection });
+  }
+  return _alertQueue;
+}
+
+// Lazy proxy preserves existing exports for worker and scheduler daemons
+export const checkQueue = new Proxy({} as Queue, {
+  get(_target, prop) {
+    const queue = getCheckQueue();
+    const val = Reflect.get(queue, prop);
+    return typeof val === 'function' ? val.bind(queue) : val;
+  },
+});
+
+export const alertQueue = new Proxy({} as Queue, {
+  get(_target, prop) {
+    const queue = getAlertQueue();
+    const val = Reflect.get(queue, prop);
+    return typeof val === 'function' ? val.bind(queue) : val;
+  },
+});

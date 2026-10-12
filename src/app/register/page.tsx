@@ -143,7 +143,7 @@ export default function RegisterPage() {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-3 flex items-center justify-center gap-2 bg-gradient-to-r from-brand-500 to-coral-500 hover:from-brand-600 hover:to-coral-600 text-white font-semibold py-3 px-4 rounded-xl shadow-[0_0_25px_rgba(168,72,240,0.35)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+            className="w-full mt-3 flex items-center justify-center gap-2 bg-linear-to-r from-brand-500 to-coral-500 hover:from-brand-600 hover:to-coral-600 text-white font-semibold py-3 px-4 rounded-xl shadow-[0_0_25px_rgba(168,72,240,0.35)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed text-sm"
           >
             {submitting ? 'Initializing infrastructure...' : 'Create Organization Workspace'}
             <ArrowRight className="w-4 h-4" />

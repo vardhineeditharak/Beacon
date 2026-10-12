@@ -42,7 +42,7 @@ export function BeaconLogo({
       {/* Beacon Brandmark Emblem */}
       <div className={`relative flex items-center justify-center shrink-0 ${iconSizes[size]}`}>
         {/* Ambient violet-to-coral glow */}
-        <div className="absolute inset-0 bg-gradient-to-tr from-brand-600/35 to-coral-500/25 blur-lg rounded-2xl pointer-events-none" />
+        <div className="absolute inset-0 bg-linear-to-tr from-brand-600/35 to-coral-500/25 blur-lg rounded-2xl pointer-events-none" />
         <Image
           src="/beacon-mark.svg"
           alt="Beacon Brandmark"

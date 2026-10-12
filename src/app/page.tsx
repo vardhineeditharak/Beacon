@@ -379,7 +379,7 @@ export default function Dashboard() {
           <button
             type="button"
             onClick={() => setShowAddForm(!showAddForm)}
-            className="bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-white font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-[0_0_24px_rgba(168,72,240,0.35)] transition-all active:scale-[0.98] cursor-pointer"
+            className="bg-linear-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-white font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-[0_0_24px_rgba(168,72,240,0.35)] transition-all active:scale-[0.98] cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>New Monitor</span>
@@ -787,7 +787,7 @@ export default function Dashboard() {
                         </span>
                       </div>
                       <div className="flex items-center gap-1 text-xs text-ink-muted group">
-                        <span className="truncate max-w-[240px] font-mono">{monitor.target}</span>
+                        <span className="truncate max-w-60 font-mono">{monitor.target}</span>
                         {monitor.target.startsWith('http') && (
                           <a
                             href={monitor.target}
