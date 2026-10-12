@@ -1,46 +1,94 @@
 # Beacon
 
 <p align="center">
-  <img src="public/beacon-logo.svg" alt="Beacon Logo" width="220" />
+  <img src="public/beacon-logo.svg" alt="Beacon Logo" width="240" />
 </p>
 
-A high-performance infrastructure and uptime telemetry platform built with Next.js 16, React 19, Prisma ORM, BullMQ, Redis, and Tailwind CSS.
+A high-performance infrastructure, heartbeat, and uptime telemetry platform built with **Next.js 16** (App Router, Turbopack, Cache Components), **React 19**, **Prisma ORM**, **PostgreSQL**, **Tailwind CSS v4**, and dual execution architectures (**Serverless Cron** for zero-cost cloud deployment + **BullMQ/Redis** for distributed self-hosted clusters).
 
-## Features
+---
 
-- **Multi-protocol Monitoring**: HTTP/HTTPS, Ping (ICMP), TCP port checks, and Keyword verification.
-- **Incident Lifecycle Management**: Automatic retry / verification before declaring downtime, incident logging, and auto-resolution upon recovery.
-- **Background Job Queue**: High-throughput distributed task scheduling with BullMQ and Redis.
-- **Real-Time Dashboard**: Interactive status cards, response-time latency graphs, uptime percentages, and quick pause/resume/delete actions.
+## Key Features
+
+- **Multi-Protocol Telemetry**:
+  - `HTTP / HTTPS`: Status codes, SSL timing, and latency measurement with redirect-safe SSRF guard.
+  - `KEYWORD`: Deep payload inspection asserting required strings in response body.
+  - `PING (ICMP)`: Roundtrip network reachability and packet loss verification.
+  - `TCP Socket`: Direct port connectivity with strict connection deadline guards.
+  - `HEARTBEAT`: Inbound push monitoring with dedicated webhook endpoints (`/api/heartbeat/:slug`).
+- **Organization-Scoped Multi-Tenancy**:
+  - Secure encrypted cookie sessions (`iron-session`) with Argon2/Bcrypt hashed credentials.
+  - Tenant isolation preventing IDOR and cross-organization telemetry leakage.
+  - Dedicated organization workspaces with role-based member associations.
+- **Dual Deployment Models**:
+  - **Serverless Cron (Vercel + Neon)**: Runs 24/7 with zero idle compute cost, no sleeping instances, and no Render free-tier hour burn.
+  - **Self-Hosted Background Daemons (BullMQ + Redis)**: High-concurrency worker (`scripts/worker.ts`) and scheduler (`scripts/scheduler.ts`) for dedicated VM/Docker environments.
+- **Enterprise Security & Reliability**:
+  - Next.js 16 `proxy.ts` route protection.
+  - Server-Side Request Forgery (SSRF) defense blocking private RFC1918, loopback, link-local, and cloud metadata (AWS `169.254.169.254`, GCP).
+  - Rate-limiting, CSRF origin verification, and Content Security Policy (CSP) headers.
+  - Automated PingResult retention window (prunes telemetry older than 7 days).
 
 ---
 
 ## Architecture Overview
 
-1. **Web Dashboard & API (`src/`)**: Next.js App Router for the user interface and REST API endpoints (`/api/monitors`).
-2. **Database (`prisma/schema.prisma`)**: PostgreSQL with Prisma ORM storing organizations, monitors, incidents, and ping metrics.
-3. **Scheduler Service (`scripts/scheduler.ts`)**: Cron runner scheduling periodic monitor checks into Redis queues.
-4. **Worker Service (`scripts/worker.ts`)**: BullMQ worker processing checks, measuring latency, recording metrics, and triggering alerts.
+```
+                                      +------------------------------------+
+                                      |            Browser Client          |
+                                      +-----------------+------------------+
+                                                        |
+                                            (proxy.ts / Session Auth)
+                                                        v
+                                      +------------------------------------+
+                                      |        Next.js 16 App Router       |
+                                      +--------+------------------+--------+
+                                               |                  |
+                         +---------------------+                  +--------------------+
+                         v                                                             v
+        +---------------------------------+                           +---------------------------------+
+        |      Serverless Cron Model      |                           |    Self-Hosted Daemon Model     |
+        |  (Vercel Cron /api/cron/check)  |                           |     (BullMQ Worker & Scheduler) |
+        +----------------+----------------+                           +----------------+----------------+
+                         |                                                             |
+                         v                                                             v
+        +---------------------------------+                           +---------------------------------+
+        |   Neon Serverless PostgreSQL    |                           |      Redis Queue + Postgres     |
+        +---------------------------------+                           +---------------------------------+
+```
 
 ---
 
 ## Getting Started
 
 ### 1. Prerequisites
-- **Node.js** (v18+)
-- **PostgreSQL** (running locally or remotely)
-- **Redis** (running locally or remotely)
+- **Node.js**: `>= 20.9.0` (required by Next.js 16)
+- **Package Manager**: `npm` (or `pnpm`)
+- **Database**: PostgreSQL (e.g., [Neon Serverless](https://neon.tech) free tier, or local Postgres)
+- **Optional**: Redis (only required if running local BullMQ worker/scheduler daemons)
 
-### 2. Environment Variables
-Copy `.env.example` to `.env` and configure your credentials:
+### 2. Environment Configuration
+Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
 
-Ensure your `.env` contains:
+Set the required environment variables:
 ```env
+# PostgreSQL connection URL
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/beacon?schema=public"
+
+# Redis connection (optional for serverless cron; required for scripts/worker.ts)
 REDIS_URL="redis://127.0.0.1:6379"
+
+# Session encryption password (minimum 32 characters; generate via: openssl rand -base64 32)
+SESSION_PASSWORD="your-secure-session-encryption-password-min-32-chars"
+
+# Secret token protecting serverless cron endpoints
+CRON_SECRET="your-secure-cron-secret-token"
+
+# Base application URL for CSRF origin verification
+NEXT_PUBLIC_APP_URL="http://localhost:3000"
 ```
 
 ### 3. Install Dependencies
@@ -49,40 +97,51 @@ npm install
 ```
 
 ### 4. Database Setup
-Push the Prisma schema to your database:
+Push the schema to your PostgreSQL database:
 ```bash
 npm run db:push
 ```
 
-### 5. Running the Application
+---
 
-You can run the web interface, the background scheduler, and the worker poller concurrently:
+## Development & Deployment
 
-- **Web Dashboard**:
-  ```bash
-  npm run dev
-  ```
-  Visit [http://localhost:3000](http://localhost:3000)
+### Running Locally (Next.js Dev Server)
+```bash
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) to create your operator account and configure monitors.
 
-- **Worker Service**:
-  ```bash
-  npm run worker
-  ```
+### Running Local Queue Workers (Optional)
+If running self-hosted BullMQ daemons:
+```bash
+# Terminal 1: Check poller worker
+npm run worker
 
-- **Scheduler Service**:
-  ```bash
-  npm run scheduler
-  ```
+# Terminal 2: Periodic interval scheduler
+npm run scheduler
+```
+
+### Free 24/7 Cloud Deployment (No Screentime Burn)
+To avoid Render's 15-minute sleep cycle, 750 free compute hours limitation, and 30-day PostgreSQL database deletion:
+1. **Database**: Create a free PostgreSQL instance on [Neon](https://neon.tech) (0.5 GB persistent free storage, serverless connection pooling). Set `DATABASE_URL` with pooled connection.
+2. **Hosting**: Deploy to [Vercel](https://vercel.com).
+3. **Automated Monitoring**: The included `vercel.json` automatically schedules `/api/cron/check` every minute using Vercel Cron. Add `CRON_SECRET` and `SESSION_PASSWORD` in your Vercel Project Environment Variables.
 
 ---
 
 ## Available Scripts
 
-| Script | Command | Description |
+| Script | Command | Purpose |
 |---|---|---|
-| `npm run dev` | `next dev` | Start Next.js development server |
-| `npm run build` | `next build` | Build optimized production bundle |
-| `npm run start` | `next start` | Start production Next.js server |
-| `npm run db:push` | `prisma db push` | Push schema changes to database |
-| `npm run worker` | `tsx scripts/worker.ts` | Start BullMQ check worker |
-| `npm run scheduler` | `tsx scripts/scheduler.ts` | Start periodic check scheduler |
+| `npm run dev` | `next dev` | Start local Next.js development server with Turbopack |
+| `npm run build` | `next build` | Build production Next.js application |
+| `npm run start` | `next start` | Run production Next.js server |
+| `npm run db:push` | `prisma db push` | Push Prisma schema directly to PostgreSQL database |
+| `npm run worker` | `tsx scripts/worker.ts` | Launch BullMQ poller and alert dispatcher |
+| `npm run scheduler` | `tsx scripts/scheduler.ts` | Launch interval cron check scheduler |
+
+---
+
+## License
+MIT

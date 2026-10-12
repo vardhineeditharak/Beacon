@@ -1,89 +1,142 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-
-const VALID_TYPES = ['HTTP', 'PING', 'TCP', 'KEYWORD', 'HEARTBEAT'] as const;
-
-function isValidType(value: unknown): boolean {
-  return typeof value === 'string' && (VALID_TYPES as readonly string[]).includes(value);
-}
+import { requireSession } from '@/lib/auth';
+import { validateTargetSecurity, createMonitorSchema } from '@/lib/validation';
+import { validateCsrfOrigin } from '@/lib/csrf';
+import { checkRateLimit } from '@/lib/rateLimit';
 
 export async function GET() {
+  const session = await requireSession();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     const monitors = await prisma.monitor.findMany({
+      where: { orgId: session.orgId },
       orderBy: { createdAt: 'desc' },
-      include: {
+      select: {
+        id: true,
+        orgId: true,
+        name: true,
+        type: true,
+        target: true,
+        keyword: true,
+        interval: true,
+        timeoutMs: true,
+        status: true,
+        lastHeartbeatAt: true,
+        lastCheckedAt: true,
+        createdAt: true,
+        updatedAt: true,
         pingResults: {
-          take: 50,
-          orderBy: { timestamp: 'desc' }
+          take: 30,
+          orderBy: { timestamp: 'desc' },
+          select: {
+            id: true,
+            status: true,
+            responseTimeMs: true,
+            httpStatusCode: true,
+            errorMessage: true,
+            timestamp: true,
+          },
         },
         incidents: {
           take: 1,
-          where: { status: 'DOWN' }
-        }
-      }
+          where: { status: 'DOWN' },
+          select: {
+            id: true,
+            status: true,
+            errorCause: true,
+            startedAt: true,
+            resolvedAt: true,
+          },
+        },
+      },
     });
+
     return NextResponse.json(monitors);
   } catch (error: unknown) {
     console.error('[API] GET /api/monitors failed:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to fetch monitors' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch monitors' }, { status: 500 });
   }
 }
 
 export async function POST(req: Request) {
+  const session = await requireSession();
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  if (!validateCsrfOrigin(req)) {
+    return NextResponse.json({ error: 'CSRF validation failed: invalid origin' }, { status: 403 });
+  }
+
+  // Rate limit monitor creation per user/IP
+  const rateLimit = await checkRateLimit(`monitor-create:${session.userId}`, 20, 60);
+  if (!rateLimit.success) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded: too many monitor creations. Please wait.' },
+      { status: 429, headers: { 'Retry-After': String(rateLimit.resetSeconds) } }
+    );
+  }
+
   try {
-    const data = await req.json();
+    const body = await req.json();
 
-    // Basic validation to avoid creating invalid monitors.
-    const name = typeof data.name === 'string' ? data.name.trim() : '';
-    const target = typeof data.target === 'string' ? data.target.trim() : '';
-    const type = data.type;
-
-    if (!name) {
-      return NextResponse.json({ error: 'Monitor name is required.' }, { status: 400 });
-    }
-    if (!target) {
-      return NextResponse.json({ error: 'Monitor target is required.' }, { status: 400 });
-    }
-    if (!isValidType(type)) {
-      return NextResponse.json({ error: `Invalid monitor type: ${String(type)}` }, { status: 400 });
+    // 1. Zod schema validation (name, type, interval allowlist, timeoutMs range)
+    const parsed = createMonitorSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: parsed.error.issues[0]?.message || 'Invalid monitor parameters' },
+        { status: 400 }
+      );
     }
 
-    const parsedInterval = parseInt(data.interval, 10);
-    const interval = Number.isNaN(parsedInterval) || parsedInterval < 1 ? 5 : parsedInterval;
+    const { name, target, type, interval, timeoutMs } = parsed.data;
 
-    // In a real app, orgId comes from authenticated session context.
-    // We are mocking a default organization for the prototype.
-    let defaultOrg = await prisma.organization.findFirst();
-    if (!defaultOrg) {
-      const user = await prisma.user.create({
-        data: { email: 'admin@beacon.dev', passwordHash: 'mock', name: 'Admin' }
-      });
-      defaultOrg = await prisma.organization.create({
-        data: { name: 'Beacon Team', ownerId: user.id }
-      });
+    // 2. KEYWORD validation (BUG-010)
+    let keyword: string | null = null;
+    if (type === 'KEYWORD') {
+      const kw = parsed.data.keyword?.trim();
+      if (!kw) {
+        return NextResponse.json(
+          { error: 'Keyword is required for KEYWORD monitor type' },
+          { status: 400 }
+        );
+      }
+      keyword = kw;
     }
 
+    // 3. SSRF and target validation (SEC-003)
+    const targetCheck = await validateTargetSecurity(target, type);
+    if (!targetCheck.valid) {
+      return NextResponse.json(
+        { error: targetCheck.error || 'Invalid or forbidden target destination' },
+        { status: 400 }
+      );
+    }
+
+    const cleanTarget = targetCheck.cleanTarget || target;
+
+    // 4. Create monitor scoped to session org (SEC-002, SEC-005, BUG-022)
     const monitor = await prisma.monitor.create({
       data: {
-        orgId: defaultOrg.id,
+        orgId: session.orgId,
         name,
         type,
-        target,
+        target: cleanTarget,
         interval,
-        timeoutMs: data.timeoutMs ? parseInt(data.timeoutMs) : 30000,
-        keyword: data.keyword || null
-      }
+        timeoutMs,
+        keyword,
+        status: 'UP',
+        nextCheckAt: new Date(), // Check immediately on creation
+      },
     });
 
     return NextResponse.json(monitor, { status: 201 });
   } catch (error: unknown) {
     console.error('[API] POST /api/monitors failed:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to create monitor' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: 'Failed to create monitor' }, { status: 500 });
   }
 }

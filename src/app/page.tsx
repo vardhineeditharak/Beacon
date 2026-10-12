@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState, useEffect, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import {
   Activity,
@@ -10,12 +11,15 @@ import {
   Play,
   Trash2,
   RefreshCw,
-  Zap,
   ShieldCheck,
   AlertTriangle,
   Clock,
   ExternalLink,
   X,
+  LogOut,
+  Building,
+  HeartPulse,
+  Zap,
 } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts';
 import { BeaconLogo } from '@/components/BeaconLogo';
@@ -23,27 +27,39 @@ import { BeaconLogo } from '@/components/BeaconLogo';
 type PingResult = {
   responseTimeMs: number;
   timestamp: string;
-  status?: string;
+  status?: 'UP' | 'DOWN';
+  errorMessage?: string | null;
 };
 
 type Monitor = {
   id: string;
+  orgId: string;
   name: string;
   target: string;
-  type: string;
+  type: 'HTTP' | 'PING' | 'TCP' | 'KEYWORD' | 'HEARTBEAT';
   status: 'UP' | 'DOWN' | 'PAUSED' | 'DEGRADED';
   interval: number;
+  timeoutMs: number;
   keyword?: string | null;
+  lastHeartbeatAt?: string | null;
   pingResults: PingResult[];
+};
+
+type UserOrg = {
+  user: { id: string; email: string; name: string };
+  organization: { id: string; name: string; slug: string } | null;
 };
 
 type FilterTab = 'ALL' | 'UP' | 'DOWN' | 'PAUSED';
 
 export default function Dashboard() {
+  const router = useRouter();
   const [monitors, setMonitors] = useState<Monitor[]>([]);
+  const [userOrg, setUserOrg] = useState<UserOrg | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterTab, setFilterTab] = useState<FilterTab>('ALL');
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -51,15 +67,21 @@ export default function Dashboard() {
   const [newMonitor, setNewMonitor] = useState({
     name: '',
     target: '',
-    type: 'HTTP',
+    type: 'HTTP' as Monitor['type'],
     interval: 5,
+    timeoutMs: 30000,
     keyword: '',
   });
 
-  const fetchMonitors = useCallback(async (isSilent = false) => {
-    if (!isSilent) setRefreshing(true);
+  // Centralized fetch with global 401 handling
+  const fetchMonitors = useCallback(async () => {
     try {
       const res = await fetch('/api/monitors');
+      if (res.status === 401) {
+        toast.error('Session expired. Please sign in.');
+        router.push('/login');
+        return;
+      }
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error || 'Failed to fetch monitors');
@@ -67,36 +89,69 @@ export default function Dashboard() {
       const data = (await res.json()) as Monitor[];
       setMonitors(data);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to fetch monitors');
+      toast.error(err instanceof Error ? err.message : 'Failed to fetch telemetry');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [router]);
 
+  // BUG-014: Single unified mount effect (no duplicate fetch logic)
+  // BUG-017: Background polling every 25s with document.hidden guard and cleanup
   useEffect(() => {
     let active = true;
-    (async () => {
-      try {
-        const res = await fetch('/api/monitors');
-        if (!res.ok) {
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error || 'Failed to fetch monitors');
+
+    fetch('/api/monitors')
+      .then((res) => {
+        if (res.status === 401) {
+          router.push('/login');
+          return null;
         }
-        const data = (await res.json()) as Monitor[];
-        if (active) setMonitors(data);
-      } catch (err: unknown) {
+        if (!res.ok) throw new Error('Failed to fetch monitors');
+        return res.json();
+      })
+      .then((data: Monitor[] | null) => {
+        if (active && data) {
+          setMonitors(data);
+          setLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
         if (active) {
-          toast.error(err instanceof Error ? err.message : 'Failed to fetch monitors');
+          toast.error(err instanceof Error ? err.message : 'Failed to fetch telemetry');
+          setLoading(false);
         }
-      } finally {
-        if (active) setLoading(false);
+      });
+
+    fetch('/api/auth/me')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: UserOrg | null) => {
+        if (active && data) setUserOrg(data);
+      })
+      .catch(() => {});
+
+    const intervalId = setInterval(() => {
+      if (!document.hidden && active) {
+        void fetchMonitors();
       }
-    })();
+    }, 25000);
+
     return () => {
       active = false;
+      clearInterval(intervalId);
     };
-  }, []);
+  }, [fetchMonitors, router]);
+
+  const handleSignOut = async () => {
+    const id = toast.loading('Terminating session...');
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      toast.success('Logged out successfully', { id });
+      router.push('/login');
+    } catch {
+      toast.error('Sign out failed', { id });
+    }
+  };
 
   const handleAddMonitor = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,10 +164,17 @@ export default function Dashboard() {
           name: newMonitor.name.trim(),
           target: newMonitor.target.trim(),
           type: newMonitor.type,
-          interval: newMonitor.interval,
-          keyword: newMonitor.keyword ? newMonitor.keyword.trim() : undefined,
+          interval: Number(newMonitor.interval),
+          timeoutMs: Number(newMonitor.timeoutMs),
+          keyword: newMonitor.type === 'KEYWORD' ? newMonitor.keyword.trim() : undefined,
         }),
       });
+
+      if (res.status === 401) {
+        toast.error('Session expired', { id });
+        router.push('/login');
+        return;
+      }
 
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -121,23 +183,37 @@ export default function Dashboard() {
 
       toast.success('Monitor initialized & enqueued', { id });
       setShowAddForm(false);
-      setNewMonitor({ name: '', target: '', type: 'HTTP', interval: 5, keyword: '' });
-      fetchMonitors(true);
+      setNewMonitor({
+        name: '',
+        target: '',
+        type: 'HTTP',
+        interval: 5,
+        timeoutMs: 30000,
+        keyword: '',
+      });
+      void fetchMonitors();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to create monitor', { id });
     }
   };
 
-  const handleDelete = async (monitorId: string, name: string) => {
+  // BUG-015: Delete confirmation execution
+  const executeDelete = async (monitorId: string, name: string) => {
     const id = toast.loading(`Deleting "${name}"...`);
     try {
       const res = await fetch(`/api/monitors/${monitorId}`, { method: 'DELETE' });
+      if (res.status === 401) {
+        toast.error('Session expired', { id });
+        router.push('/login');
+        return;
+      }
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error || 'Failed to delete monitor');
       }
       toast.success('Monitor removed', { id });
-      fetchMonitors(true);
+      setConfirmDelete(null);
+      void fetchMonitors();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete monitor', { id });
     }
@@ -152,12 +228,17 @@ export default function Dashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus }),
       });
+      if (res.status === 401) {
+        toast.error('Session expired');
+        router.push('/login');
+        return;
+      }
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error || 'Failed to update monitor');
       }
       toast.success(nextStatus === 'PAUSED' ? `Paused ${monitor.name}` : `Resumed ${monitor.name}`);
-      fetchMonitors(true);
+      void fetchMonitors();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to update monitor');
     } finally {
@@ -184,14 +265,37 @@ export default function Dashboard() {
     return Number(((upCount / active) * 100).toFixed(1));
   }, [monitors.length, upCount, downCount]);
 
+  // BUG-016: Real calculated uptime percentage and bar status from actual PingResults
+  const calculatedUptime = useMemo(() => {
+    const allPings = monitors.flatMap((m) => m.pingResults || []);
+    if (allPings.length === 0) {
+      return { percentage: '100.0%', isAvailable: false, bars: Array(18).fill('NEUTRAL') };
+    }
+    const upPings = allPings.filter((p) => p.status === 'UP').length;
+    const percent = ((upPings / allPings.length) * 100).toFixed(2);
+
+    // Group recent pings into 18 segments
+    const bars: ('UP' | 'DOWN' | 'NEUTRAL')[] = [];
+    const segmentSize = Math.max(1, Math.floor(allPings.length / 18));
+    for (let i = 0; i < 18; i++) {
+      const slice = allPings.slice(i * segmentSize, (i + 1) * segmentSize);
+      if (slice.length === 0) {
+        bars.push('NEUTRAL');
+      } else {
+        const hasDown = slice.some((p) => p.status === 'DOWN');
+        bars.push(hasDown ? 'DOWN' : 'UP');
+      }
+    }
+
+    return { percentage: `${percent}%`, isAvailable: true, bars };
+  }, [monitors]);
+
   const filteredMonitors = useMemo(() => {
     return monitors.filter((m) => {
-      // Tab filter
       if (filterTab === 'UP' && m.status !== 'UP') return false;
       if (filterTab === 'DOWN' && m.status !== 'DOWN') return false;
       if (filterTab === 'PAUSED' && m.status !== 'PAUSED') return false;
 
-      // Query filter
       const q = searchQuery.trim().toLowerCase();
       if (!q) return true;
       return (
@@ -250,13 +354,23 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Action Controls */}
-        <div className="flex items-center gap-3">
+        {/* Tenant Scope & Action Controls */}
+        <div className="flex items-center flex-wrap gap-3">
+          {userOrg?.organization && (
+            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-night-850 border border-night-700 text-xs text-ink-muted font-mono">
+              <Building className="w-3.5 h-3.5 text-brand-400" />
+              <span className="text-ink font-semibold">{userOrg.organization.name}</span>
+            </div>
+          )}
+
           <button
             type="button"
-            onClick={() => fetchMonitors()}
+            onClick={() => {
+              setRefreshing(true);
+              void fetchMonitors();
+            }}
             disabled={refreshing}
-            className="p-2.5 text-ink-muted hover:text-ink bg-night-850 hover:bg-night-800 border border-night-700 rounded-xl transition-all disabled:opacity-50"
+            className="p-2.5 text-ink-muted hover:text-ink bg-night-850 hover:bg-night-800 border border-night-700 rounded-xl transition-all disabled:opacity-50 cursor-pointer"
             title="Refresh Telemetry"
           >
             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin text-brand-400' : ''}`} />
@@ -265,10 +379,19 @@ export default function Dashboard() {
           <button
             type="button"
             onClick={() => setShowAddForm(!showAddForm)}
-            className="bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-white font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-[0_0_24px_rgba(168,72,240,0.35)] transition-all active:scale-[0.98]"
+            className="bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-white font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-[0_0_24px_rgba(168,72,240,0.35)] transition-all active:scale-[0.98] cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>New Monitor</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className="p-2.5 text-ink-muted hover:text-coral-400 bg-night-850 hover:bg-night-800 border border-night-700 rounded-xl transition-all cursor-pointer"
+            title="Sign Out"
+          >
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </header>
@@ -341,12 +464,12 @@ export default function Dashboard() {
             <Zap className="w-5 h-5 text-brand-400" />
           </div>
           <div className="mt-3">
-            <div className="text-3xl font-extrabold tracking-tight text-ink">
+            <div className="text-3xl font-extrabold tracking-tight text-ink font-mono">
               {avgLatency !== null ? `${avgLatency} ms` : '—'}
             </div>
-            <p className="text-xs text-ink-muted mt-1">Global response round-trip</p>
+            <p className="text-xs text-ink-muted mt-1">Live telemetry roundtrip</p>
           </div>
-          <div className="mt-3 flex items-center gap-1.5 text-xs">
+          <div className="mt-3 flex items-center gap-2 text-xs font-mono">
             <span className="w-2 h-2 rounded-full bg-brand-400" />
             <span className="text-ink-muted">
               {avgLatency === null
@@ -358,27 +481,72 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Metric 4: Vigilance Status */}
+        {/* Metric 4: Real Calculated Telemetry Signal Health (BUG-016 Fixed) */}
         <div className="bg-night-850 border border-night-700/80 p-5 rounded-2xl relative overflow-hidden group hover:border-brand-500/40 transition-colors shadow-[0_0_30px_rgba(168,72,240,0.03)]">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-ink-muted uppercase tracking-wider">Signal Health</span>
             <Clock className="w-5 h-5 text-brand-400" />
           </div>
           <div className="mt-3">
-            <div className="text-3xl font-extrabold tracking-tight text-ink">99.98%</div>
-            <p className="text-xs text-ink-muted mt-1">30-day calculated uptime</p>
+            <div className="text-3xl font-extrabold tracking-tight text-ink">
+              {calculatedUptime.percentage}
+            </div>
+            <p className="text-xs text-ink-muted mt-1">
+              {calculatedUptime.isAvailable ? 'Measured probe uptime' : 'Calibrating fleet telemetry'}
+            </p>
           </div>
           <div className="mt-3 flex items-center gap-1">
-            {Array.from({ length: 18 }).map((_, i) => (
+            {calculatedUptime.bars.map((barStatus, i) => (
               <span
                 key={i}
-                className="h-3 flex-1 rounded-xs bg-brand-500/80 hover:bg-brand-400 transition-colors"
-                title="Continuous 100% Signal"
+                className={`h-3 flex-1 rounded-xs transition-colors ${
+                  barStatus === 'UP'
+                    ? 'bg-brand-500/80 hover:bg-brand-400'
+                    : barStatus === 'DOWN'
+                    ? 'bg-coral-500 hover:bg-coral-400'
+                    : 'bg-night-800'
+                }`}
+                title={barStatus === 'UP' ? '100% Signal UP' : barStatus === 'DOWN' ? 'Disruption recorded' : 'Awaiting data'}
               />
             ))}
           </div>
         </div>
       </section>
+
+      {/* Delete Confirmation Modal (BUG-015 Fixed) */}
+      {confirmDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-night-850 border border-coral-500/40 p-6 rounded-2xl max-w-md w-full shadow-[0_0_50px_rgba(255,96,72,0.2)] space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-xl bg-coral-500/15 text-coral-400">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-ink">Delete Monitor?</h3>
+                <p className="text-xs text-ink-muted mt-1">
+                  Are you sure you want to delete <span className="text-ink font-semibold">&quot;{confirmDelete.name}&quot;</span>? All historical telemetry pings and incident logs will be permanently deleted.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-night-700/80">
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-ink-muted hover:text-ink hover:bg-night-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeDelete(confirmDelete.id, confirmDelete.name)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-coral-500 hover:bg-coral-600 text-white shadow-[0_0_20px_rgba(255,96,72,0.4)] transition-all cursor-pointer"
+              >
+                Confirm Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add Monitor Form Modal/Card */}
       {showAddForm && (
@@ -396,7 +564,7 @@ export default function Dashboard() {
             <button
               type="button"
               onClick={() => setShowAddForm(false)}
-              className="p-1.5 text-ink-muted hover:text-ink hover:bg-night-800 rounded-lg transition-colors"
+              className="p-1.5 text-ink-muted hover:text-ink hover:bg-night-800 rounded-lg transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -405,197 +573,203 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div className="space-y-2">
               <label className="text-xs font-semibold text-ink uppercase tracking-wider">Monitor Name</label>
-              <div className="relative">
-                <input
-                  required
-                  type="text"
-                  placeholder="e.g. Primary API Cluster"
-                  value={newMonitor.name}
-                  onChange={(e) => setNewMonitor({ ...newMonitor, name: e.target.value })}
-                  className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500/50"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-ink uppercase tracking-wider">Target Endpoint</label>
               <input
                 required
                 type="text"
-                placeholder="https://api.domain.com or 1.1.1.1:443"
-                value={newMonitor.target}
-                onChange={(e) => setNewMonitor({ ...newMonitor, target: e.target.value })}
-                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                value={newMonitor.name}
+                onChange={(e) => setNewMonitor({ ...newMonitor, name: e.target.value })}
+                placeholder="Production API Gateway"
+                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors font-sans"
               />
             </div>
 
             <div className="space-y-2">
-              <label className="text-xs font-semibold text-ink uppercase tracking-wider">Protocol Type</label>
+              <label className="text-xs font-semibold text-ink uppercase tracking-wider">Monitor Protocol</label>
               <select
                 value={newMonitor.type}
-                onChange={(e) => setNewMonitor({ ...newMonitor, type: e.target.value })}
-                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500/50"
+                onChange={(e) =>
+                  setNewMonitor({ ...newMonitor, type: e.target.value as Monitor['type'] })
+                }
+                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors"
               >
-                <option value="HTTP">HTTP / HTTPS (Web Endpoint)</option>
-                <option value="PING">Ping (ICMP Echo)</option>
-                <option value="TCP">TCP Port (Custom Socket)</option>
-                <option value="KEYWORD">Keyword Match (Body Payload)</option>
+                <option value="HTTP">HTTP(s) Status Check</option>
+                <option value="KEYWORD">Keyword Body Inspection</option>
+                <option value="PING">ICMP Ping Probe</option>
+                <option value="TCP">TCP Port Socket</option>
+                <option value="HEARTBEAT">Inbound Heartbeat Push</option>
               </select>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-ink uppercase tracking-wider">Polling Interval</label>
-              <select
-                value={newMonitor.interval}
-                onChange={(e) => setNewMonitor({ ...newMonitor, interval: parseInt(e.target.value, 10) })}
-                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500/50"
-              >
-                <option value={1}>1 Minute (Real-time telemetry)</option>
-                <option value={5}>5 Minutes (Standard verification)</option>
-                <option value={15}>15 Minutes (Low traffic)</option>
-                <option value={30}>30 Minutes</option>
-                <option value={60}>60 Minutes (Hourly check)</option>
-              </select>
+            <div className="space-y-2 md:col-span-2">
+              <label className="text-xs font-semibold text-ink uppercase tracking-wider">
+                {newMonitor.type === 'TCP'
+                  ? 'Target Host & Port (hostname:port)'
+                  : newMonitor.type === 'PING'
+                  ? 'Target Hostname or Public IP'
+                  : newMonitor.type === 'HEARTBEAT'
+                  ? 'Heartbeat Identifier Slug (e.g. cron-billing-worker)'
+                  : 'Target Endpoint URL (http:// or https://)'}
+              </label>
+              <input
+                required
+                type="text"
+                value={newMonitor.target}
+                onChange={(e) => setNewMonitor({ ...newMonitor, target: e.target.value })}
+                placeholder={
+                  newMonitor.type === 'TCP'
+                    ? 'api.example.com:443'
+                    : newMonitor.type === 'PING'
+                    ? '1.1.1.1'
+                    : newMonitor.type === 'HEARTBEAT'
+                    ? 'nightly-data-sync'
+                    : 'https://api.company.com/health'
+                }
+                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors font-mono"
+              />
+              {newMonitor.type === 'HEARTBEAT' && (
+                <p className="text-[11px] text-brand-300 font-mono mt-1">
+                  💡 Inbound trigger URL: /api/heartbeat/{newMonitor.target || ':slug'}
+                </p>
+              )}
             </div>
 
             {newMonitor.type === 'KEYWORD' && (
               <div className="space-y-2 md:col-span-2">
-                <label className="text-xs font-semibold text-ink uppercase tracking-wider">Expected Keyword</label>
+                <label className="text-xs font-semibold text-ink uppercase tracking-wider">
+                  Required Response Keyword
+                </label>
                 <input
+                  required
                   type="text"
-                  placeholder="e.g. &quot;status&quot;: &quot;ok&quot;"
                   value={newMonitor.keyword}
                   onChange={(e) => setNewMonitor({ ...newMonitor, keyword: e.target.value })}
-                  className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none"
+                  placeholder='"status":"healthy"'
+                  className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors font-mono"
                 />
               </div>
             )}
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-ink uppercase tracking-wider">Check Interval</label>
+              <select
+                value={newMonitor.interval}
+                onChange={(e) => setNewMonitor({ ...newMonitor, interval: Number(e.target.value) })}
+                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors"
+              >
+                <option value={1}>Every 1 minute</option>
+                <option value={5}>Every 5 minutes</option>
+                <option value={15}>Every 15 minutes</option>
+                <option value={30}>Every 30 minutes</option>
+                <option value={60}>Every 60 minutes</option>
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-ink uppercase tracking-wider">
+                Timeout Threshold
+              </label>
+              <select
+                value={newMonitor.timeoutMs}
+                onChange={(e) => setNewMonitor({ ...newMonitor, timeoutMs: Number(e.target.value) })}
+                className="w-full bg-night-900 border border-night-700 rounded-xl px-4 py-2.5 text-sm text-ink focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors"
+              >
+                <option value={5000}>5 seconds</option>
+                <option value={10000}>10 seconds</option>
+                <option value={30000}>30 seconds (standard)</option>
+                <option value={60000}>60 seconds (extended)</option>
+              </select>
+            </div>
           </div>
 
-          <div className="flex justify-end items-center gap-3 pt-3 border-t border-night-700">
+          <div className="flex items-center justify-end gap-3 pt-4 border-t border-night-700">
             <button
               type="button"
               onClick={() => setShowAddForm(false)}
-              className="px-5 py-2.5 text-sm text-ink-muted hover:text-ink transition-colors"
+              className="px-4 py-2.5 text-sm text-ink-muted hover:text-ink transition-colors cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="bg-brand-500 hover:bg-brand-600 text-white font-semibold px-6 py-2.5 rounded-xl shadow-[0_0_20px_rgba(168,72,240,0.35)] transition-all"
+              className="bg-brand-500 hover:bg-brand-600 text-white font-semibold px-5 py-2.5 rounded-xl shadow-[0_0_20px_rgba(168,72,240,0.4)] transition-all cursor-pointer"
             >
-              Save & Launch Monitor
+              Deploy Monitor
             </button>
           </div>
         </form>
       )}
 
-      {/* Monitors Listing & Telemetry Console */}
-      <section className="bg-night-850 border border-night-700/80 rounded-2xl overflow-hidden shadow-[0_0_40px_rgba(168,72,240,0.04)]">
-        {/* Filter & Search Toolbar */}
-        <div className="p-4 sm:p-5 border-b border-night-700/80 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-night-900/40">
-          {/* Filter Pills */}
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0">
-            {(
-              [
-                { id: 'ALL', label: 'All Monitors', count: monitors.length },
-                { id: 'UP', label: 'Operational', count: upCount },
-                { id: 'DOWN', label: 'Incidents', count: downCount },
-                { id: 'PAUSED', label: 'Paused', count: pausedCount },
-              ] as const
-            ).map((tab) => {
-              const isActive = filterTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setFilterTab(tab.id)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all flex items-center gap-2 shrink-0 ${
-                    isActive
-                      ? 'bg-brand-500 text-white shadow-[0_0_15px_rgba(168,72,240,0.35)]'
-                      : 'bg-night-800 text-ink-muted hover:text-ink hover:bg-night-700/60'
-                  }`}
-                >
-                  <span>{tab.label}</span>
-                  <span
-                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
-                      isActive ? 'bg-white/20 text-white' : 'bg-night-900 text-ink-faint'
-                    }`}
-                  >
-                    {tab.count}
-                  </span>
-                </button>
-              );
-            })}
+      {/* Main Stream Controls: Filter Pills & Live Search */}
+      <section className="space-y-4">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+          {/* Status Filter Tab Pills */}
+          <div className="flex items-center gap-1.5 p-1 bg-night-850 border border-night-700 rounded-xl">
+            {(['ALL', 'UP', 'DOWN', 'PAUSED'] as FilterTab[]).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setFilterTab(tab)}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  filterTab === tab
+                    ? 'bg-brand-500/20 text-brand-300 border border-brand-500/40 shadow-[0_0_12px_rgba(168,72,240,0.2)]'
+                    : 'text-ink-muted hover:text-ink hover:bg-night-800'
+                }`}
+              >
+                {tab === 'ALL' && `All (${monitors.length})`}
+                {tab === 'UP' && `Operational (${upCount})`}
+                {tab === 'DOWN' && `Disrupted (${downCount})`}
+                {tab === 'PAUSED' && `Paused (${pausedCount})`}
+              </button>
+            ))}
           </div>
 
-          {/* Search Field */}
-          <div className="relative w-full md:w-72">
-            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-faint" />
+          {/* Search Box */}
+          <div className="relative w-full sm:w-72">
+            <Search className="w-4 h-4 text-ink-muted absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by name, target, type..."
-              className="w-full bg-night-900 border border-night-700 rounded-xl pl-10 pr-9 py-2 text-xs text-ink placeholder:text-ink-faint focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500/40"
+              placeholder="Search monitors or targets..."
+              className="w-full bg-night-850 border border-night-700 rounded-xl pl-9 pr-4 py-2 text-xs text-ink placeholder:text-ink-faint focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors"
             />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
           </div>
         </div>
 
-        {/* Monitor Rows */}
+        {/* Telemetry Stream List Card */}
         {loading ? (
-          <div className="py-20 flex flex-col items-center justify-center space-y-3 text-ink-muted">
-            <RefreshCw className="w-6 h-6 animate-spin text-brand-400" />
-            <p className="text-sm font-medium">Synchronizing Beacon Telemetry...</p>
-          </div>
-        ) : monitors.length === 0 ? (
-          <div className="py-20 text-center space-y-4 px-4">
-            <div className="w-16 h-16 mx-auto rounded-3xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center shadow-[0_0_30px_rgba(168,72,240,0.2)]">
-              <Activity className="w-8 h-8 text-brand-400" />
-            </div>
-            <div className="space-y-1">
-              <h3 className="text-base font-bold text-ink">No Monitors Configured</h3>
-              <p className="text-xs text-ink-muted max-w-sm mx-auto">
-                Begin telemetry by adding your first HTTP endpoint, Ping target, or TCP port above.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowAddForm(true)}
-              className="bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold px-4 py-2 rounded-xl transition-all shadow-[0_0_15px_rgba(168,72,240,0.3)] inline-flex items-center gap-1.5"
-            >
-              <Plus className="w-3.5 h-3.5" /> Create First Monitor
-            </button>
+          <div className="bg-night-850 border border-night-700/80 rounded-2xl p-12 text-center space-y-3">
+            <RefreshCw className="w-6 h-6 text-brand-400 animate-spin mx-auto" />
+            <p className="text-sm text-ink-muted font-medium">Connecting to Beacon Telemetry Engine...</p>
           </div>
         ) : filteredMonitors.length === 0 ? (
-          <div className="py-16 text-center space-y-2 text-ink-muted">
-            <p className="text-sm">No monitors match &quot;{searchQuery}&quot;</p>
-            <button
-              type="button"
-              onClick={() => {
-                setSearchQuery('');
-                setFilterTab('ALL');
-              }}
-              className="text-xs text-brand-400 hover:underline"
-            >
-              Reset filters
-            </button>
+          <div className="bg-night-850 border border-night-700/80 rounded-2xl p-12 text-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-night-800 flex items-center justify-center mx-auto text-ink-muted">
+              <Activity className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-ink">No telemetry streams found</h3>
+              <p className="text-xs text-ink-muted mt-1 max-w-sm mx-auto">
+                {searchQuery || filterTab !== 'ALL'
+                  ? 'No monitors matched your search or status filter parameters.'
+                  : 'Get started by creating your first endpoint check or heartbeat monitor.'}
+              </p>
+            </div>
+            {!searchQuery && filterTab === 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setShowAddForm(true)}
+                className="bg-brand-500 hover:bg-brand-600 text-white font-semibold px-4 py-2 rounded-xl text-xs transition-all shadow-[0_0_20px_rgba(168,72,240,0.3)] cursor-pointer"
+              >
+                Configure First Monitor
+              </button>
+            )}
           </div>
         ) : (
-          <div className="divide-y divide-night-700/60">
+          <div className="bg-night-850 border border-night-700/80 rounded-2xl divide-y divide-night-700/60 overflow-hidden shadow-[0_0_40px_rgba(168,72,240,0.03)]">
             {filteredMonitors.map((monitor) => {
-              const pingList = monitor.pingResults || [];
-              const latestPing = pingList[0];
-              const reversePings = [...pingList].reverse();
+              const latestPing = monitor.pingResults?.[0];
+              const reversePings = [...(monitor.pingResults || [])].reverse();
 
               return (
                 <div
@@ -625,6 +799,16 @@ export default function Dashboard() {
                           </a>
                         )}
                       </div>
+                      {monitor.type === 'HEARTBEAT' && (
+                        <div className="flex items-center gap-1 text-[11px] text-brand-300 font-mono">
+                          <HeartPulse className="w-3 h-3" />
+                          <span>
+                            {monitor.lastHeartbeatAt
+                              ? `Last ping: ${new Date(monitor.lastHeartbeatAt).toLocaleTimeString()}`
+                              : 'No heartbeats received yet'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -643,11 +827,11 @@ export default function Dashboard() {
                           <LineChart data={reversePings}>
                             <Tooltip
                               contentStyle={{
-                                backgroundColor: '#101027',
-                                border: '1px solid #242450',
+                                backgroundColor: '#080e1e',
+                                border: '1px solid #1e293b',
                                 borderRadius: '8px',
                                 fontSize: '11px',
-                                color: '#eef0ff',
+                                color: '#f8fafc',
                               }}
                               labelStyle={{ display: 'none' }}
                               itemStyle={{ color: '#a848f0' }}
@@ -689,9 +873,9 @@ export default function Dashboard() {
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => handleToggleStatus(monitor)}
+                        onClick={() => void handleToggleStatus(monitor)}
                         disabled={togglingId === monitor.id}
-                        className={`p-2 rounded-xl transition-all border ${
+                        className={`p-2 rounded-xl transition-all border cursor-pointer ${
                           monitor.status === 'PAUSED'
                             ? 'bg-brand-500/10 text-brand-300 border-brand-500/30 hover:bg-brand-500/20'
                             : 'bg-night-800 text-ink-muted border-night-700 hover:text-ink hover:bg-night-700'
@@ -705,10 +889,11 @@ export default function Dashboard() {
                         )}
                       </button>
 
+                      {/* BUG-015: Delete with confirmation modal */}
                       <button
                         type="button"
-                        onClick={() => handleDelete(monitor.id, monitor.name)}
-                        className="p-2 text-ink-muted hover:text-coral-500 bg-night-800 hover:bg-coral-500/10 border border-night-700 hover:border-coral-500/30 rounded-xl transition-colors"
+                        onClick={() => setConfirmDelete({ id: monitor.id, name: monitor.name })}
+                        className="p-2 text-ink-muted hover:text-coral-500 bg-night-800 hover:bg-coral-500/10 border border-night-700 hover:border-coral-500/30 rounded-xl transition-colors cursor-pointer"
                         title="Delete Monitor"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -726,10 +911,10 @@ export default function Dashboard() {
       <footer className="pt-6 border-t border-night-700/60 flex flex-col sm:flex-row items-center justify-between text-xs text-ink-muted gap-3">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-brand-400 animate-ping" />
-          <span>Beacon Telemetry Engine active • Next.js 16 • Turbopack</span>
+          <span>Beacon Telemetry Engine • Next.js 16 • Turbopack</span>
         </div>
         <div className="flex items-center gap-4 text-ink-faint font-mono text-[11px]">
-          <span>BullMQ Redis Queue</span>
+          <span>Serverless Cron Engine</span>
           <span>•</span>
           <span>PostgreSQL Prisma ORM</span>
         </div>
