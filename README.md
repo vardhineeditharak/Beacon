@@ -1,6 +1,6 @@
 # Beacon
 
-![Beacon Logo](public/beacon-logo.svg)
+<img src="public/beacon-logo.svg" alt="Beacon Logo" width="320" style="background: #ffffff; border-radius: 12px; padding: 8px;" />
 
 A high-performance infrastructure, heartbeat, and uptime telemetry platform built with **Next.js 16** (App Router, Turbopack, Cache Components), **React 19**, **Prisma ORM**, **PostgreSQL**, **Tailwind CSS v4**, and dual execution architectures (**Serverless Cron** for zero-cost cloud deployment + **BullMQ/Redis** for distributed self-hosted clusters).
 
