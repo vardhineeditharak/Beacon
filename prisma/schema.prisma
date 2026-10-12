@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  passwordHash  String
+  name          String
+  organizations Organization[]
+  createdAt     DateTime       @default(now())
+}
+
+model Organization {
+  id        String          @id @default(uuid())
+  name      String
+  ownerId   String
+  owner     User            @relation(fields: [ownerId], references: [id])
+  monitors  Monitor[]
+  alerts    AlertContact[]
+  createdAt DateTime        @default(now())
+}
+
+enum MonitorType {
+  HTTP
+  PING
+  TCP
+  KEYWORD
+  HEARTBEAT
+}
+
+enum MonitorStatus {
+  UP
+  DOWN
+  PAUSED
+  DEGRADED
+}
+
+model Monitor {
+  id            String        @id @default(uuid())
+  orgId         String
+  organization  Organization  @relation(fields: [orgId], references: [id])
+  name          String
+  type          MonitorType
+  target        String        // URL, IP, or Port mapping
+  keyword       String?       // For Keyword monitors
+  interval      Int           // In minutes: 1, 5, 15, 30, 60
+  timeoutMs     Int           @default(30000)
+  status        MonitorStatus @default(UP)
+  
+  incidents     Incident[]
+  pingResults   PingResult[]
+  
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  
+  @@index([orgId])
+}
+
+model AlertContact {
+  id            String       @id @default(uuid())
+  orgId         String
+  organization  Organization @relation(fields: [orgId], references: [id])
+  type          String       // EMAIL, WEBHOOK, SLACK
+  destination   String       // Email address or Webhook URL
+  active        Boolean      @default(true)
+}
+
+model Incident {
+  id          String    @id @default(uuid())
+  monitorId   String
+  monitor     Monitor   @relation(fields: [monitorId], references: [id])
+  status      String    // DOWN, RESOLVED
+  errorCause  String?
+  startedAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+}
+
+model PingResult {
+  id             String   @id @default(uuid())
+  monitorId      String
+  monitor        Monitor  @relation(fields: [monitorId], references: [id])
+  timestamp      DateTime @default(now())
+  status         String   // UP, DOWN
+  responseTimeMs Int
+  httpStatusCode Int?
+  errorMessage   String?
+  
+  @@index([monitorId, timestamp(sort: Desc)])
+}
